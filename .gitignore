@@ -1,0 +1,14 @@
+# Flutter/Dart
+.dart_tool/
+.packages
+.pub-cache/
+build/
+.idea/
+*.iml
+android/local.properties
+*.lock
+.env
+
+# macOS
+.DS_Store
+

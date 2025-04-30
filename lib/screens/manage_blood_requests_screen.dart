@@ -1,0 +1,617 @@
+import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:intl/intl.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:flutter_animate/flutter_animate.dart';
+import 'package:logger/logger.dart';
+import 'contacted_blood_requests_screen.dart';
+
+final logger = Logger();
+
+class ManageBloodRequestsScreen extends StatefulWidget {
+  const ManageBloodRequestsScreen({super.key});
+
+  @override
+  ManageBloodRequestsScreenState createState() =>
+      ManageBloodRequestsScreenState();
+}
+
+class ManageBloodRequestsScreenState extends State<ManageBloodRequestsScreen> {
+  final SupabaseClient supabase = Supabase.instance.client;
+  List<Map<String, dynamic>> _allRequests = [];
+  List<Map<String, dynamic>> _contactedRequests = [];
+  final List<String> _states = [
+    'All',
+    'Maharashtra',
+    'Delhi',
+    'Karnataka',
+    'West Bengal',
+    'Tamil Nadu',
+    'Telangana',
+    'Gujarat'
+  ];
+  String _selectedState = 'All';
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    logger.i("ManageBloodRequestsScreen: Initializing");
+    _fetchRequests();
+  }
+
+  Future<void> _fetchRequests() async {
+    setState(() => _isLoading = true);
+    try {
+      // Fetch Pending requests
+      final pendingQuery = supabase
+          .from('user_requestblood')
+          .select(
+              'id, user_id, ngo_id, request_time, patient_name, mobile_number, remarks, address, blood_group, status')
+          .eq('status', 'Pending')
+          .order('request_time', ascending: true);
+
+      // Fetch Contacted requests for button enablement
+      final contactedQuery = supabase
+          .from('user_requestblood')
+          .select(
+              'id, user_id, ngo_id, request_time, patient_name, mobile_number, remarks, address, blood_group, status')
+          .eq('status', 'Contacted');
+
+      final pendingResponse = await pendingQuery;
+      final contactedResponse = await contactedQuery;
+      logger.i('Pending fetch response: ${pendingResponse.length} requests');
+      logger
+          .i('Contacted fetch response: ${contactedResponse.length} requests');
+
+      final requestsWithDetails = await Future.wait(
+          [...pendingResponse, ...contactedResponse].map((request) async {
+        final userId = request['user_id'] as String?;
+        if (userId == null) {
+          logger.w('User ID is null for request: $request');
+          return {
+            ...request,
+            'user_full_name': request['patient_name'] ?? 'Unknown',
+            'user_city': 'N/A',
+            'user_state': 'N/A',
+            'user_phone': request['mobile_number'] ?? 'N/A',
+            'user_email': 'N/A',
+          };
+        }
+        final user = await supabase
+            .from('user_signup')
+            .select('full_name, city, state, phone, email')
+            .eq('id', userId)
+            .single()
+            .catchError((e) {
+          logger.e('User fetch error for user_id $userId: $e');
+          return {
+            'full_name': 'Unknown',
+            'city': 'N/A',
+            'state': 'N/A',
+            'phone': 'N/A',
+            'email': 'N/A'
+          };
+        });
+        return {
+          ...request,
+          'user_full_name':
+              user['full_name'] ?? request['patient_name'] ?? 'Unknown',
+          'user_city': user['city'] ?? 'N/A',
+          'user_state': user['state'] ?? 'N/A',
+          'user_phone': user['phone'] ?? request['mobile_number'] ?? 'N/A',
+          'user_email': user['email'] ?? 'N/A',
+        };
+      }).toList());
+
+      if (mounted) {
+        setState(() {
+          _allRequests = requestsWithDetails
+              .where((r) =>
+                  r['status'] == 'Pending' &&
+                  (_selectedState == 'All' ||
+                      r['user_state'] == _selectedState))
+              .toList();
+          _contactedRequests = requestsWithDetails
+              .where((r) => r['status'] == 'Contacted')
+              .toList();
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      logger.e('Fetch requests error: $e');
+      if (mounted) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error fetching requests: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _updateRequestStatus(String requestId, String status) async {
+    if (requestId.isEmpty ||
+        !RegExp(r'^[0-9a-fA-F-]{36}$').hasMatch(requestId)) {
+      logger.e('Invalid request ID format: $requestId');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Invalid request ID format')),
+        );
+      }
+      return;
+    }
+
+    try {
+      logger.i('Checking if request exists for ID: $requestId');
+      final checkResponse = await supabase
+          .from('user_requestblood')
+          .select('id, status')
+          .eq('id', requestId)
+          .maybeSingle();
+
+      if (checkResponse == null) {
+        logger.w('No request found for ID: $requestId');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Request not found')),
+          );
+        }
+        return;
+      }
+
+      if (checkResponse['status'] == status) {
+        logger.i('Status is already $status for request ID: $requestId');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Status is already $status')),
+          );
+        }
+        return;
+      }
+
+      logger.i('Updating status for ID: $requestId to $status');
+      final response = await supabase
+          .from('user_requestblood')
+          .update({'status': status})
+          .eq('id', requestId)
+          .select()
+          .maybeSingle();
+
+      if (response != null) {
+        logger.i('Update successful for request ID: $requestId');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Status updated to $status')),
+          );
+          await _fetchRequests(); // Refresh data
+        }
+      } else {
+        logger.w('Update failed, no rows affected for ID: $requestId');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content:
+                    Text('Failed to update status: No matching request found')),
+          );
+        }
+      }
+    } catch (e) {
+      logger.e('Update error for ID: $requestId: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error updating status: $e')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFFAF7F0),
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, color: Color(0xFF2E5902)),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: Text(
+          'Manage Blood Requests',
+          style: GoogleFonts.poppins(
+            color: const Color(0xFF2E5902),
+            fontWeight: FontWeight.bold,
+            fontSize: 20,
+          ),
+        ),
+        centerTitle: true,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Pending Blood Requests',
+              style: GoogleFonts.poppins(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: const Color(0xFF2E5902),
+              ),
+            ).animate().slideX(
+                duration: 500.ms, begin: -1, end: 0, curve: Curves.easeOut),
+            const SizedBox(height: 8),
+            Text(
+              'Track and manage pending blood requests.',
+              style: GoogleFonts.poppins(
+                fontSize: 14,
+                color: Colors.grey[700]!,
+              ),
+            ).animate().fadeIn(duration: 700.ms),
+            const SizedBox(height: 16),
+            DropdownButton<String>(
+              value: _selectedState,
+              items: _states.map((String state) {
+                return DropdownMenuItem<String>(
+                  value: state,
+                  child: Text(state,
+                      style: GoogleFonts.poppins(
+                          color: const Color(0xFF2E5902), fontSize: 14)),
+                );
+              }).toList(),
+              onChanged: (String? newValue) {
+                setState(() {
+                  _selectedState = newValue!;
+                  _fetchRequests();
+                });
+              },
+              dropdownColor: Colors.white,
+              style: GoogleFonts.poppins(color: const Color(0xFF2E5902)),
+              underline: Container(),
+              icon: const Icon(Icons.arrow_drop_down, color: Color(0xFF2E5902)),
+            ),
+            const SizedBox(height: 12),
+            Expanded(
+              child: _isLoading
+                  ? const Center(
+                      child:
+                          CircularProgressIndicator(color: Color(0xFF2E5902)))
+                  : _allRequests.isEmpty
+                      ? Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Icon(Icons.local_hospital,
+                                  size: 60, color: Colors.red),
+                              const SizedBox(height: 10),
+                              Text(
+                                'No Pending Blood Requests',
+                                style: GoogleFonts.poppins(
+                                  fontSize: 18,
+                                  color: const Color(0xFF2E5902),
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              Text(
+                                'Try adjusting the state filter or check data.',
+                                style: GoogleFonts.poppins(
+                                    color: Colors.grey, fontSize: 14),
+                              ),
+                            ],
+                          ),
+                        )
+                      : ListView.builder(
+                          itemCount: _allRequests.length,
+                          itemBuilder: (context, index) {
+                            final request = _allRequests[index];
+                            final requestTimeString =
+                                request['request_time'] as String?;
+                            final requestTime = requestTimeString != null
+                                ? DateTime.parse(requestTimeString)
+                                : DateTime.now();
+                            return _buildRequestCard(
+                                request, requestTime, index);
+                          },
+                        ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: ElevatedButton(
+                onPressed: _contactedRequests.isNotEmpty
+                    ? () {
+                        logger.i(
+                            'Navigating to ContactedBloodRequestsScreen with ${_contactedRequests.length} contacted requests');
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) =>
+                                const ContactedBloodRequestsScreen(),
+                          ),
+                        );
+                      }
+                    : null,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF2E5902),
+                  disabledBackgroundColor: Colors.grey,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                child: Text(
+                  'Contacted Requests',
+                  style: GoogleFonts.poppins(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRequestCard(
+      Map<String, dynamic> request, DateTime requestTime, int index) {
+    final formattedTime =
+        DateFormat('dd MMM yyyy, hh:mm a').format(requestTime);
+    final urgency = DateTime.now().difference(requestTime).inHours < 24
+        ? 'Urgent'
+        : 'Normal';
+    final currentStatus = request['status'] ?? 'Pending';
+    const availableStatuses = [
+      'Pending',
+      'Contacted',
+      'Completed',
+    ];
+
+    return Card(
+      elevation: 2,
+      margin: const EdgeInsets.only(bottom: 12),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          request['user_full_name'] ??
+                              request['patient_name'] ??
+                              'Unknown',
+                          style: GoogleFonts.poppins(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: const Color(0xFF2E5902),
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (urgency == 'Urgent') ...[
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.red.shade900,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            'Urgent',
+                            style: GoogleFonts.poppins(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.red.shade900,
+                    borderRadius: BorderRadius.circular(5),
+                  ),
+                  child: Text(
+                    request['blood_group'] ?? 'N/A',
+                    style: GoogleFonts.poppins(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                const Icon(Icons.phone, color: Colors.black54, size: 18),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    request['user_phone'] ?? request['mobile_number'] ?? 'N/A',
+                    style: GoogleFonts.poppins(
+                        fontSize: 12, color: Colors.black87),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                const Icon(Icons.location_on, color: Colors.black54, size: 18),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    request['address'] ?? 'N/A',
+                    style: GoogleFonts.poppins(
+                        fontSize: 12, color: Colors.black87),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                const Icon(Icons.notes, color: Colors.black54, size: 18),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    request['remarks']?.isEmpty ?? true
+                        ? 'No remarks'
+                        : request['remarks'],
+                    style: GoogleFonts.poppins(
+                        fontSize: 12, color: Colors.black54),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                const Icon(Icons.location_city,
+                    color: Colors.black54, size: 18),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    'City: ${request['user_city']}',
+                    style: GoogleFonts.poppins(
+                        fontSize: 12, color: Colors.black87),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                const Icon(Icons.map, color: Colors.black54, size: 18),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    'State: ${request['user_state']}',
+                    style: GoogleFonts.poppins(
+                        fontSize: 12, color: Colors.black87),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                const Icon(Icons.warning, color: Colors.black54, size: 18),
+                const SizedBox(width: 4),
+                Text(
+                  'Urgency: $urgency',
+                  style:
+                      GoogleFonts.poppins(fontSize: 12, color: Colors.black87),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Text(
+                    'Requested: $formattedTime',
+                    style: GoogleFonts.poppins(
+                        fontSize: 10, color: Colors.black54),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                DropdownButton<String>(
+                  value: currentStatus,
+                  items: availableStatuses.map((String status) {
+                    return DropdownMenuItem<String>(
+                      value: status,
+                      child: Text(
+                        status,
+                        style: GoogleFonts.poppins(
+                          color: const Color(0xFF2E5902),
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                  onChanged: (String? newStatus) async {
+                    if (newStatus != null && newStatus != currentStatus) {
+                      bool? confirmed = await showDialog<bool>(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: Text(
+                            'Confirm Status Change',
+                            style: GoogleFonts.poppins(
+                              fontWeight: FontWeight.bold,
+                              color: const Color(0xFF2E5902),
+                            ),
+                          ),
+                          content: Text(
+                            'Change status to "$newStatus" for ${request['user_full_name'] ?? 'this request'}?',
+                            style: GoogleFonts.poppins(),
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context, false),
+                              child: Text(
+                                'Cancel',
+                                style: GoogleFonts.poppins(
+                                  color: Colors.grey,
+                                ),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () => Navigator.pop(context, true),
+                              child: Text(
+                                'Confirm',
+                                style: GoogleFonts.poppins(
+                                  color: const Color(0xFF2E5902),
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+
+                      if (confirmed == true && mounted) {
+                        await _updateRequestStatus(
+                            request['id'].toString(), newStatus);
+                      }
+                    }
+                  },
+                  dropdownColor: Colors.white,
+                  style: GoogleFonts.poppins(
+                      color: const Color(0xFF2E5902), fontSize: 14),
+                  icon: const Icon(Icons.arrow_drop_down,
+                      color: Color(0xFF2E5902), size: 24),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    ).animate().fadeIn(duration: 500.ms, delay: (100 * index).ms);
+  }
+}
